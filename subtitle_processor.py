@@ -92,6 +92,21 @@ def parse_srt_files() -> list[str]:
     return phrases
 
 
+def _release_torch_cache():
+    """Force release PyTorch cached memory (CUDA and MPS)."""
+    if TORCH_AVAILABLE and torch is not None:
+        try:
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            mps_backend = getattr(torch.backends, 'mps', None)
+            if mps_backend and mps_backend.is_available():
+                torch.mps.empty_cache()
+        except Exception:
+            pass
+
+
 class LocalTranslator:
     """Local translator using NLLB-200 model."""
     
@@ -156,7 +171,8 @@ class LocalTranslator:
                     [text],
                     return_tensors="pt",
                     padding=True,
-                    truncation=True
+                    truncation=True,
+                    max_length=200,
                 )
                 encoded = {key: value.to(self._device) for key, value in encoded.items()}
                 
@@ -164,15 +180,18 @@ class LocalTranslator:
                     generated = self._model.generate(
                         **encoded,
                         forced_bos_token_id=self._tokenizer.convert_tokens_to_ids(target_lang),
-                        max_new_tokens=160,
-                        num_beams=1
+                        max_length=200,
+                        num_beams=1,
                     )
                 
                 result = self._tokenizer.batch_decode(generated, skip_special_tokens=True)[0].strip()
                 translated.append(result)
                 
-                if (i + 1) % 50 == 0:
-                    print(f"  Traducidas {i + 1}/{len(texts)} frases...")
+                del encoded
+                del generated
+                
+                if (i + 1) % 5 == 0:
+                    _release_torch_cache()
                     
             except Exception as e:
                 print(f"Error traduciendo: {text[:50]}... - {e}")
@@ -180,6 +199,24 @@ class LocalTranslator:
         
         print(f"Traducción completada: {len(translated)} frases.")
         return translated
+    
+    def clear(self):
+        """Release the NLLB model and tokenizer from memory."""
+        with self._lock:
+            if self._model is not None:
+                del self._model
+            if self._tokenizer is not None:
+                del self._tokenizer
+            if self._device is not None:
+                del self._device
+            self._model = None
+            self._tokenizer = None
+            self._device = None
+            _release_torch_cache()
+            print("Modelo NLLB liberado de memoria.")
+
+
+_translator_instance = None
 
 
 def translate_to_spanish(texts: list[str]) -> list[str]:
@@ -187,8 +224,10 @@ def translate_to_spanish(texts: list[str]) -> list[str]:
     if not TRANSFORMERS_AVAILABLE:
         raise RuntimeError("transformers no está instalado. Ejecuta: pip install transformers")
     
-    translator = LocalTranslator()
-    return translator.translate_to_spanish(texts)
+    global _translator_instance
+    if _translator_instance is None:
+        _translator_instance = LocalTranslator()
+    return _translator_instance.translate_to_spanish(texts)
 
 
 def generate_cache_name(text: str, language: str) -> str:
@@ -271,7 +310,24 @@ class LocalTTS:
             wav_file.setframerate(sample_rate)
             wav_file.writeframes(pcm.tobytes())
         
+        del waveform
+        del encoded
+        _release_torch_cache()
+        
         return "mms-tts"
+    
+    def clear(self):
+        """Release all loaded models from memory."""
+        with self._lock:
+            for language, (tokenizer, model, device) in self._models.items():
+                del model
+                del tokenizer
+            self._models.clear()
+            _release_torch_cache()
+            print("Modelos MMS-TTS liberados de memoria.")
+
+
+_tts_instance = None
 
 
 def generate_tts_audio(text: str, language: str, output: Path) -> str:
@@ -279,8 +335,10 @@ def generate_tts_audio(text: str, language: str, output: Path) -> str:
     if not TORCH_AVAILABLE or not TRANSFORMERS_AVAILABLE:
         raise RuntimeError("torch y transformers no están instalados. Ejecuta: pip install torch transformers")
     
-    tts = LocalTTS()
-    return tts.generate_audio(text, language, output)
+    global _tts_instance
+    if _tts_instance is None:
+        _tts_instance = LocalTTS()
+    return _tts_instance.generate_audio(text, language, output)
 
 
 async def process_phrases(english_texts: list[str], spanish_texts: list[str]) -> list[dict[str, Any]]:
@@ -374,6 +432,14 @@ async def main() -> None:
     print(f"Audio español: {AUDIO_ES_DIR}")
     print(f"Catálogo: {PHRASES_JSON}")
     print("=" * 60)
+
+    print("Liberando modelos de memoria...")
+    global _tts_instance, _translator_instance
+    if _tts_instance is not None:
+        _tts_instance.clear()
+    if _translator_instance is not None:
+        _translator_instance.clear()
+    print("Memoria liberada completamente.")
 
 
 if __name__ == "__main__":

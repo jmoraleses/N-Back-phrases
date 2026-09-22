@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve the game and generate/cache natural neural TTS audio before each session."""
+"""Serve the game with pre-generated audio; use local models only for subtitle processing."""
 
 from __future__ import annotations
 
@@ -7,12 +7,13 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 import numpy as np
 import wave
 
@@ -83,9 +84,72 @@ def send_sse_event(handler: SimpleHTTPRequestHandler, event: str, data: dict) ->
         raise
 
 
-def cache_name(text: str, language: str) -> str:
-    digest = hashlib.sha256(f"{language}\0{text}".encode("utf-8")).hexdigest()[:24]
+MMS_VOICE_ID = "mms"
+
+
+def cache_name(text: str, language: str, voice: str = MMS_VOICE_ID) -> str:
+    digest = hashlib.sha256(f"{language}\0{voice}\0{text}".encode("utf-8")).hexdigest()[:24]
     return f"{digest}.wav"
+
+
+def get_system_voices(language: str) -> list[dict[str, str]]:
+    """Return installed macOS voices matching the requested language."""
+    locale_prefix = "en_" if language == "en" else "es_"
+    try:
+        result = subprocess.run(
+            ["say", "-v", "?"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    voices = []
+    for line in result.stdout.splitlines():
+        match = re.match(r"^(.+?)\s{2,}([a-z]{2}_[A-Z]{2})\s+#", line.strip())
+        if match and match.group(2).startswith(locale_prefix):
+            name = match.group(1).strip()
+            voices.append({"id": name, "name": f"{name} · {match.group(2)}", "engine": "macOS say"})
+    return voices
+
+
+def get_voice_options(language: str) -> list[dict[str, str]]:
+    """Return neural and installed system voices for a language."""
+    options = []
+    if TORCH_AVAILABLE and TRANSFORMERS_AVAILABLE:
+        options.append({
+            "id": MMS_VOICE_ID,
+            "name": "MMS-TTS · voz neural",
+            "engine": "mms-tts",
+        })
+    options.extend(get_system_voices(language))
+    return options
+
+
+def validate_voice(language: str, voice: str | None) -> str:
+    options = get_voice_options(language)
+    available = {item["id"] for item in options}
+    voice_id = (voice or (MMS_VOICE_ID if MMS_VOICE_ID in available else (options[0]["id"] if options else ""))).strip()
+    if voice_id not in available:
+        raise ValueError(f"Voz no disponible para {language}: {voice_id}")
+    return voice_id
+
+
+def _release_torch_cache():
+    """Force release PyTorch cached memory (CUDA and MPS)."""
+    if TORCH_AVAILABLE and torch is not None:
+        try:
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            mps_backend = getattr(torch.backends, 'mps', None)
+            if mps_backend and mps_backend.is_available():
+                torch.mps.empty_cache()
+        except Exception:
+            pass
 
 
 class LocalTTS:
@@ -137,6 +201,16 @@ class LocalTTS:
             print(f"Modelo MMS-TTS cargado para {language}.")
             return self._models[language]
     
+    def clear(self):
+        """Release all loaded models from memory."""
+        with self._lock:
+            for language, (tokenizer, model, device) in self._models.items():
+                del model
+                del tokenizer
+            self._models.clear()
+            _release_torch_cache()
+            print("Modelos MMS-TTS liberados de memoria.")
+    
     def generate_audio(self, text: str, language: str, output: Path) -> str:
         """Generate TTS audio using MMS-TTS."""
         tokenizer, model, device = self._load_model(language)
@@ -162,6 +236,10 @@ class LocalTTS:
             wav_file.setframerate(sample_rate)
             wav_file.writeframes(pcm.tobytes())
         
+        del waveform
+        del encoded
+        _release_torch_cache()
+        
         return "mms-tts"
 
 
@@ -176,13 +254,13 @@ def get_tts():
 
 
 async def generate_edge_tts(text: str, language: str, output: Path) -> None:
-    """Generate TTS audio using MMS-TTS."""
+    """Generate TTS audio using MMS-TTS in a thread to avoid blocking the event loop."""
     tts = get_tts()
-    tts.generate_audio(text, language, output)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, tts.generate_audio, text, language, output)
 
 
-def generate_say(text: str, language: str, output: Path) -> None:
-    voice = "Mónica" if language == "es" else "Samantha"
+def generate_say(text: str, voice: str, output: Path) -> None:
     with tempfile.NamedTemporaryFile(suffix=".aiff", dir=CACHE, delete=False) as temporary:
         source = Path(temporary.name)
     try:
@@ -204,15 +282,13 @@ def generate_say(text: str, language: str, output: Path) -> None:
         source.unlink(missing_ok=True)
 
 
-def generate_audio(text: str, language: str, output: Path) -> str:
-    if TORCH_AVAILABLE and TRANSFORMERS_AVAILABLE:
-        try:
-            asyncio.run(generate_edge_tts(text, language, output))
-            return "mms-tts"
-        except Exception as error:  # noqa: BLE001
-            print(f"MMS-TTS failed, using local voice: {error}")
-            output.unlink(missing_ok=True)
-    generate_say(text, language, output)
+def generate_audio(text: str, language: str, voice: str, output: Path) -> str:
+    if voice == MMS_VOICE_ID:
+        if not TORCH_AVAILABLE or not TRANSFORMERS_AVAILABLE:
+            raise RuntimeError("MMS-TTS no está disponible en este entorno.")
+        asyncio.run(generate_edge_tts(text, language, output))
+        return "mms-tts"
+    generate_say(text, voice, output)
     return "macOS say"
 
 
@@ -367,7 +443,7 @@ class LocalTranslator:
                     return_tensors="pt",
                     padding=True,
                     truncation=True,
-                    max_length=200
+                    max_length=200,
                 )
                 encoded = {key: value.to(self._device) for key, value in encoded.items()}
                 
@@ -375,18 +451,36 @@ class LocalTranslator:
                     generated = self._model.generate(
                         **encoded,
                         forced_bos_token_id=self._tokenizer.convert_tokens_to_ids(target_lang),
-                        max_new_tokens=200,
-                        num_beams=1
+                        max_length=200,
+                        num_beams=1,
                     )
                 
                 result = self._tokenizer.batch_decode(generated, skip_special_tokens=True)[0].strip()
                 translated.append(result)
                 
+                del encoded
+                del generated
+                
+                if (i + 1) % 5 == 0:
+                    _release_torch_cache()
+                    
             except Exception as e:
                 print(f"Error traduciendo: {text[:50]}... - {e}")
                 translated.append(text)
         
         return translated
+    
+    def clear(self):
+        """Release the NLLB model and tokenizer from memory."""
+        with self._lock:
+            del self._model
+            del self._tokenizer
+            del self._device
+            self._model = None
+            self._tokenizer = None
+            self._device = None
+            _release_torch_cache()
+            print("Modelo NLLB liberado de memoria.")
 
 
 # Global translator instance
@@ -399,68 +493,94 @@ def get_translator():
     return _translator_instance
 
 
+def cleanup_models():
+    """Release all ML models from memory before the game starts."""
+    global _tts_instance, _translator_instance
+    tts = _tts_instance
+    if tts is not None:
+        tts.clear()
+    _tts_instance = None
+
+    translator = _translator_instance
+    if translator is not None:
+        translator.clear()
+    _translator_instance = None
+
+    print("Todos los modelos liberados de memoria.")
+
+
 async def translate_to_spanish(texts: list[str], subtitle_name: str, progress_callback=None) -> list[str]:
     """Translate English texts to Spanish using NLLB-200 with caching."""
     if not TRANSFORMERS_AVAILABLE:
         raise RuntimeError("transformers no está instalado. Ejecuta: pip install transformers")
 
-    # Load cache
-    cache = load_translation_cache()
-    subtitle_cache = cache.get(subtitle_name, {})
-
+    loop = asyncio.get_running_loop()
     translator = get_translator()
-    translated = []
 
-    # Check which texts need translation
-    texts_to_translate = []
-    translate_indices = []
-    for i, text in enumerate(texts):
-        if text in subtitle_cache:
-            translated.append(subtitle_cache[text])
-        else:
-            translated.append(None)  # placeholder
-            texts_to_translate.append(text)
-            translate_indices.append(i)
+    async def _translate():
+        cache = load_translation_cache()
+        subtitle_cache = cache.get(subtitle_name, {})
 
-    # Translate missing texts
-    if texts_to_translate:
-        if progress_callback:
-            await progress_callback({"stage": "translating", "progress": 10, "message": f"Traduciendo {len(texts_to_translate)} frases nuevas al español..."})
+        texts_to_translate = []
+        translate_indices = []
+        translated = []
+        for i, text in enumerate(texts):
+            if text in subtitle_cache:
+                translated.append(subtitle_cache[text])
+            else:
+                translated.append(None)
+                texts_to_translate.append(text)
+                translate_indices.append(i)
 
-        translated_batch = translator.translate_to_spanish(texts_to_translate)
-        
-        for j, result in enumerate(translated_batch):
-            subtitle_cache[texts_to_translate[j]] = result
-            translated[translate_indices[j]] = result
+        if texts_to_translate:
+            if progress_callback:
+                await progress_callback({"stage": "translating", "progress": 10, "message": f"Traduciendo {len(texts_to_translate)} frases nuevas al español..."})
 
-            if progress_callback and j % 5 == 0:
-                progress = 10 + int((j / len(texts_to_translate)) * 20)
-                await progress_callback({
-                    "stage": "translating",
-                    "progress": progress,
-                    "message": f"Traduciendo {j + 1} de {len(texts_to_translate)}...",
-                    "current": j + 1,
-                    "total": len(texts_to_translate)
-                })
+            result = await loop.run_in_executor(
+                None, translator.translate_to_spanish, texts_to_translate
+            )
 
-        # Save updated cache
-        cache[subtitle_name] = subtitle_cache
-        save_translation_cache(cache)
+            for j, result_text in enumerate(result):
+                subtitle_cache[texts_to_translate[j]] = result_text
+                translated[translate_indices[j]] = result_text
 
-    return translated
+                if progress_callback and j % 5 == 0:
+                    progress = 10 + int((j / len(texts_to_translate)) * 20)
+                    await progress_callback({
+                        "stage": "translating",
+                        "progress": progress,
+                        "message": f"Traduciendo {j + 1} de {len(texts_to_translate)}...",
+                        "current": j + 1,
+                        "total": len(texts_to_translate),
+                    })
+
+            cache[subtitle_name] = subtitle_cache
+            save_translation_cache(cache)
+
+        return translated
+
+    return await _translate()
 
 
-def generate_cache_name(text: str, language: str) -> str:
-    """Generate cache filename from text and language."""
-    digest = hashlib.sha256(f"{language}\0{text}".encode("utf-8")).hexdigest()[:24]
-    return f"{digest}.mp3"
+def generate_cache_name(text: str, language: str, voice: str = MMS_VOICE_ID) -> str:
+    """Generate a cache filename that is unique to text, language, and voice."""
+    return cache_name(text, language, voice)
 
 
-async def process_subtitles(subtitle_filter: str | None = None, max_phrases: int | None = None, progress_callback=None) -> dict:
+async def process_subtitles(
+    subtitle_filter: str | None = None,
+    max_phrases: int | None = None,
+    voice_en: str | None = None,
+    voice_es: str | None = None,
+    progress_callback=None,
+) -> dict:
     """Process subtitles: parse, translate, generate audio, create phrases.json.
     Creates a subfolder per subtitle file with English and Spanish audio subfolders.
     Always randomly selects phrases from the subtitle file and overwrites existing audio.
     """
+
+    voice_en = validate_voice("en", voice_en)
+    voice_es = validate_voice("es", voice_es)
 
     # Clean previous audio to allow fresh generation
     clean_audio_directories()
@@ -528,8 +648,8 @@ async def process_subtitles(subtitle_filter: str | None = None, max_phrases: int
             en_text = phrase["text"]
             es_text = phrase["es"]
 
-            en_cache_name = generate_cache_name(en_text, "en")
-            es_cache_name = generate_cache_name(es_text, "es")
+            en_cache_name = generate_cache_name(en_text, "en", voice_en)
+            es_cache_name = generate_cache_name(es_text, "es", voice_es)
 
             en_cache_path = CACHE / en_cache_name
             es_cache_path = CACHE / es_cache_name
@@ -539,13 +659,17 @@ async def process_subtitles(subtitle_filter: str | None = None, max_phrases: int
 
             # Only generate if not already cached
             if not en_cache_path.exists() or en_cache_path.stat().st_size == 0:
-                await generate_edge_tts(en_text, "en", en_cache_path)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, generate_audio, en_text, "en", voice_en, en_cache_path
+                )
             # Copy to subtitle folder
             if not en_audio_path.exists():
                 shutil.copy2(en_cache_path, en_audio_path)
 
             if not es_cache_path.exists() or es_cache_path.stat().st_size == 0:
-                await generate_edge_tts(es_text, "es", es_cache_path)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, generate_audio, es_text, "es", voice_es, es_cache_path
+                )
             # Copy to subtitle folder
             if not es_audio_path.exists():
                 shutil.copy2(es_cache_path, es_audio_path)
@@ -604,15 +728,18 @@ async def process_subtitles(subtitle_filter: str | None = None, max_phrases: int
 class GameHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/.well-known/appspecific/com.chrome.devtools.json":
+            self.send_response(204)
+            self.end_headers()
+            return
         if parsed.path == "/api/tts/health":
-            language = "en" if "language=en" in parsed.query else "es"
             send_json(
                 self,
                 200,
                 {
                     "available": True,
-                    "engine": "mms-tts" if TORCH_AVAILABLE and TRANSFORMERS_AVAILABLE else "macOS say",
-                    "voiceName": f"MMS-TTS {language.upper()}",
+                    "engine": "cache",
+                    "voiceName": "Cache de audio",
                 },
             )
             return
@@ -621,6 +748,13 @@ class GameHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/subtitles/process":
             self.handle_subtitles_sse(parsed.query)
+            return
+        if parsed.path == "/api/voices":
+            language = parse_qs(parsed.query).get("language", ["es"])[0]
+            if language not in {"en", "es"}:
+                send_json(self, 400, {"error": "Idioma no válido."})
+                return
+            send_json(self, 200, {"voices": get_voice_options(language)})
             return
         if parsed.path == "/api/cleanup":
             self.handle_cleanup()
@@ -647,6 +781,8 @@ class GameHandler(SimpleHTTPRequestHandler):
         params = parse_qs(query)
         subtitle_filter = params.get("subtitle", [None])[0]
         max_phrases = int(params.get("max_phrases", [0])[0]) if params.get("max_phrases", ["0"])[0] else None
+        voice_en = params.get("voice_en", [None])[0]
+        voice_es = params.get("voice_es", [None])[0]
 
         import asyncio
         loop = asyncio.new_event_loop()
@@ -660,7 +796,13 @@ class GameHandler(SimpleHTTPRequestHandler):
                 pass
 
         try:
-            result = loop.run_until_complete(process_subtitles(subtitle_filter, max_phrases, progress_callback))
+            result = loop.run_until_complete(process_subtitles(
+                subtitle_filter,
+                max_phrases,
+                voice_en=voice_en,
+                voice_es=voice_es,
+                progress_callback=progress_callback,
+            ))
             try:
                 send_sse_event(self, "complete", result)
             except (BrokenPipeError, ConnectionResetError):
@@ -671,6 +813,7 @@ class GameHandler(SimpleHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
         finally:
+            cleanup_models()
             loop.close()
 
     def handle_cleanup(self) -> None:
@@ -710,40 +853,67 @@ class GameHandler(SimpleHTTPRequestHandler):
                 payload = json.loads(self.rfile.read(content_length)) if content_length else {}
                 subtitle_filter = payload.get("subtitle")
                 max_phrases = payload.get("max_phrases")
-                result = asyncio.run(process_subtitles(subtitle_filter, max_phrases))
+                result = asyncio.run(process_subtitles(
+                    subtitle_filter,
+                    max_phrases,
+                    voice_en=payload.get("voice_en"),
+                    voice_es=payload.get("voice_es"),
+                ))
                 send_json(self, 200, result)
             except Exception as error:  # noqa: BLE001
                 send_json(self, 500, {"error": str(error)})
+            finally:
+                cleanup_models()
             return
         if parsed.path == "/api/cleanup":
+            # handle_cleanup() owns the response, including its error response.
+            self.handle_cleanup()
+            return
+        if parsed.path == "/api/models/cleanup":
             try:
-                self.handle_cleanup()
-                send_json(self, 200, {"success": True})
+                cleanup_models()
+                send_json(self, 200, {"success": True, "message": "Modelos liberados."})
             except Exception as error:  # noqa: BLE001
                 send_json(self, 500, {"error": str(error)})
             return
-        if parsed.path != "/api/tts":
-            self.send_error(404)
+        if parsed.path == "/api/tts/test":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(content_length)) if content_length else {}
+                text = str(payload.get("text", "")).strip()
+                language = str(payload.get("language", "")).strip().lower()
+                if not text:
+                    raise ValueError("El texto de prueba está vacío.")
+                if language not in {"en", "es"}:
+                    raise ValueError("Idioma no válido.")
+                voice = validate_voice(language, str(payload.get("voice", "")))
+                filename = cache_name(text, language, voice)
+                audio_path = CACHE / filename
+                if not audio_path.exists() or audio_path.stat().st_size == 0:
+                    generate_audio(text, language, voice, audio_path)
+                send_json(self, 200, {"url": f"/tts-cache/{filename}", "cached": False})
+            except Exception as error:  # noqa: BLE001
+                send_json(self, 500, {"error": str(error)})
+            finally:
+                cleanup_models()
             return
-
-        try:
-            content_length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(content_length))
-            text = str(payload.get("text", "")).strip()
-            language = str(payload.get("language", "es")).strip().lower()
-            if not text or len(text) > 500:
-                raise ValueError("La frase debe tener entre 1 y 500 caracteres.")
-            if language not in VOICES:
-                raise ValueError("Idioma no soportado.")
-            filename = cache_name(text, language)
-            output = CACHE / filename
-            if output.exists() and output.stat().st_size > 0:
-                engine = "cache"
-            else:
-                engine = generate_audio(text, language, output)
-            send_json(self, 200, {"url": f"/tts-cache/{filename}", "engine": engine, "cached": engine == "cache"})
-        except Exception as error:  # noqa: BLE001
-            send_json(self, 500, {"error": str(error)})
+        if parsed.path == "/api/tts":
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(content_length))
+                text = str(payload.get("text", "")).strip()
+                language = str(payload.get("language", "es")).strip().lower()
+                filename = cache_name(text, language)
+                cached = CACHE / filename
+                if cached.exists() and cached.stat().st_size > 0:
+                    send_json(self, 200, {"url": f"/tts-cache/{filename}", "engine": "cache", "cached": True})
+                else:
+                    send_json(self, 404, {"error": "Audio no disponible. Procesa los subtítulos antes de jugar."})
+            except Exception as error:  # noqa: BLE001
+                send_json(self, 500, {"error": str(error)})
+            return
+        self.send_error(404)
+        return
 
 
 if __name__ == "__main__":

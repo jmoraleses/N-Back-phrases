@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#111827" />
     <title>English Phrase N-Back</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="icon" type="image/svg+xml" href="icon.svg" />
+    <link rel="stylesheet" href="styles.css?v=theme-toggle-1" />
   </head>
   <body>
     <main class="app-shell">
@@ -13,7 +14,13 @@
         <div>
           <h1>English Phrase N-Back</h1>
         </div>
-        <div id="audio-badge" class="header-badge" aria-label="Audio en español">ES · AUDIO</div>
+        <div class="header-actions">
+          <button id="theme-toggle" class="icon-button" type="button" aria-label="Cambiar a tema claro" title="Cambiar a tema claro">
+            <svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>
+            <svg class="moon-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z"/></svg>
+          </button>
+          <div id="audio-badge" class="header-badge" aria-label="Audio en español">ES · AUDIO</div>
+        </div>
       </header>
 
       <section id="setup-screen" class="screen" aria-labelledby="setup-title">
@@ -41,6 +48,7 @@
             <label class="field">
               <span>Rondas</span>
               <select id="rounds" name="rounds">
+                <option value="10">10</option>
                 <option value="20">20</option>
                 <option value="30" selected>30</option>
                 <option value="40">40</option>
@@ -64,6 +72,28 @@
             </label>
           </div>
 
+          <div class="voice-grid">
+            <div class="voice-option">
+              <label class="field" for="voice-english">
+                <span>Voz para audio inglés</span>
+                <select id="voice-english" name="voiceEnglish">
+                <option value="mms">Cargando voces…</option>
+                </select>
+              </label>
+              <button id="test-voice-english" class="button button-quiet" type="button">Probar voz inglesa</button>
+            </div>
+
+            <div class="voice-option">
+              <label class="field" for="voice-spanish">
+                <span>Voz para audio español</span>
+                <select id="voice-spanish" name="voiceSpanish">
+                <option value="mms">Cargando voces…</option>
+                </select>
+              </label>
+              <button id="test-voice-spanish" class="button button-quiet" type="button">Probar voz española</button>
+            </div>
+          </div>
+
           <label class="field speed-field" for="interval">
             <span class="range-heading">
               <span>Tiempo por frase</span>
@@ -78,7 +108,6 @@
               <span class="field-label">Audio de las frases</span>
               <p id="voice-status" class="muted">Voz natural lista para preparar la sesión.</p>
             </div>
-            <button id="test-voice" class="button button-quiet" type="button">Probar voz</button>
           </div>
 
           <div class="subtitle-process-row">
@@ -209,7 +238,6 @@
         </div>
       </section>
 
-      <footer class="app-footer">Frases procedentes de English_B2.xlsx · Audio preparado antes de cada sesión</footer>
     </main>
 
     <audio id="success-audio" src="success.mp3" preload="auto"></audio>

@@ -20,11 +20,13 @@ Si se modifica el archivo Excel, regenera el catálogo con:
 python3 scripts/import-xlsx.py
 ```
 
-El catálogo se importa con las 5.000 filas del archivo, conservando cada frase y su traducción. Antes de cada partida, el servidor comprueba y genera si hace falta todos los audios del catálogo para el idioma elegido; los archivos existentes se reutilizan desde `.tts-cache`. La secuencia de la partida se mezcla antes de empezar. Si `edge-tts` no está disponible, usa las voces locales de macOS como alternativa.
+El catálogo puede provenir del Excel o de los subtítulos procesados desde la pantalla inicial. Antes de cada partida se prepara y precarga la secuencia usando audios ya existentes. Una vez iniciada la partida no se invocan modelos de IA ni se generan audios: el navegador solo reproduce los audios precargados y muestra las frases.
 
-Cuando se selecciona audio en inglés, la aplicación reutiliza los 5.000 MP3 de `audio_english/`, relacionados con las filas del Excel por su ID (`0001.mp3` a `5000.mp3`).
+Cuando se usa el catálogo del Excel y se selecciona audio en inglés, la aplicación reutiliza los MP3 de `audio_english/`, relacionados con las filas por su ID.
 
-También se han generado 5.000 archivos españoles en `audio_spanish/`, usando la traducción de cada fila. Las traducciones repetidas comparten el mismo contenido de audio, pero cada fila conserva su archivo `0001.mp3` a `5000.mp3`.
+Los audios generados a partir de subtítulos se guardan en `audio/<subtítulo>/en/` y `audio/<subtítulo>/es/`. La traducción y la síntesis con modelos locales solo se ejecutan al pulsar «Procesar subtítulos»; al terminar y justo antes de iniciar una partida, el servidor libera los modelos.
+
+En la pantalla inicial se puede elegir una voz independiente para los audios en inglés y español. `MMS-TTS` usa la voz neural fija del modelo; las demás opciones son voces instaladas de macOS. La voz forma parte de la caché, por lo que cambiarla genera audios nuevos.
 
 En la pantalla inicial se puede elegir por separado el idioma de la frase mostrada (inglés por defecto o español) y el idioma del audio (español o inglés). Solo se muestra una versión de la frase, sin revelar una traducción adicional. El tiempo por frase se puede elegir entre 2 y 15 segundos; el valor inicial es 5 segundos.
 
