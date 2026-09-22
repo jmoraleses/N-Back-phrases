@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#111827" />
+    <title>English Phrase N-Back</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="app-header">
+        <div>
+          <h1>English Phrase N-Back</h1>
+        </div>
+        <div id="audio-badge" class="header-badge" aria-label="Audio en español">ES · AUDIO</div>
+      </header>
+
+      <section id="setup-screen" class="screen" aria-labelledby="setup-title">
+        <div class="intro-panel">
+          <h2 id="setup-title">Configura tu partida</h2>
+          <p>
+            Verás una frase en el idioma elegido mientras escuchas el audio de la frase de hace
+            <em>n</em> turnos. Debes responder si el audio que escuchas coincide con la frase que viste hace
+            <em>n</em> turnos. Las frases se seleccionan aleatoriamente del catálogo disponible.
+          </p>
+        </div>
+
+        <form id="setup-form" class="settings-card">
+          <div class="settings-grid">
+            <label class="field">
+              <span>N-back</span>
+              <select id="n-back" name="nBack">
+                <option value="1">1-back</option>
+                <option value="2" selected>2-back</option>
+                <option value="3">3-back</option>
+                <option value="4">4-back</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Rondas</span>
+              <select id="rounds" name="rounds">
+                <option value="20">20</option>
+                <option value="30" selected>30</option>
+                <option value="40">40</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Audio</span>
+              <select id="audio-language" name="audioLanguage">
+                <option value="es" selected>Español</option>
+                <option value="en">English</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Frase mostrada</span>
+              <select id="display-language" name="displayLanguage">
+                <option value="en" selected>English</option>
+                <option value="es">Español</option>
+              </select>
+            </label>
+          </div>
+
+          <label class="field speed-field" for="interval">
+            <span class="range-heading">
+              <span>Tiempo por frase</span>
+              <output id="interval-value" for="interval">8,0 s</output>
+            </span>
+            <input id="interval" name="interval" type="range" min="2000" max="15000" step="500" value="8000" />
+            <span class="range-labels"><span>Rápido</span><span>Lento</span></span>
+          </label>
+
+          <div class="audio-test-row">
+            <div>
+              <span class="field-label">Audio de las frases</span>
+              <p id="voice-status" class="muted">Voz natural lista para preparar la sesión.</p>
+            </div>
+            <button id="test-voice" class="button button-quiet" type="button">Probar voz</button>
+          </div>
+
+          <div class="subtitle-process-row">
+            <div class="subtitle-process-info">
+              <span class="field-label">Generar desde subtítulos</span>
+              <p class="muted">Procesa archivos .srt de la carpeta <code>subtitles/</code>, traduce al español y genera audios.</p>
+            </div>
+            <div class="subtitle-process-controls">
+              <select id="subtitle-select" name="subtitleSelect" class="field-select">
+                <option value="">Cargando subtítulos…</option>
+              </select>
+              <button id="process-subtitles" class="button button-quiet" type="button">Procesar subtítulos</button>
+              <button id="delete-subtitles" class="button button-danger" type="button" hidden>Eliminar subtítulo</button>
+            </div>
+          </div>
+
+          <div id="subtitle-processing" class="preparation-panel" hidden>
+            <div class="preparation-heading">
+              <span id="subtitle-status">Procesando subtítulos…</span>
+              <span id="subtitle-count">0/0</span>
+            </div>
+            <div class="preparation-track" aria-hidden="true"><div id="subtitle-bar" class="preparation-bar"></div></div>
+            <p class="muted">Esto puede tardar varios minutos. No cierres la página.</p>
+          </div>
+
+          <div id="audio-preparation" class="preparation-panel" hidden>
+            <div class="preparation-heading">
+              <span id="preparation-status">Preparando audios…</span>
+              <span id="preparation-count">0/0</span>
+            </div>
+            <div class="preparation-track" aria-hidden="true"><div id="preparation-bar" class="preparation-bar"></div></div>
+            <p class="muted">La partida empezará cuando todos los audios estén listos.</p>
+          </div>
+
+          <div class="sound-row">
+            <label class="toggle-field" for="feedback-sound">
+              <input id="feedback-sound" type="checkbox" checked />
+              <span class="toggle-ui" aria-hidden="true"></span>
+              <span>Sonido de acierto/error</span>
+            </label>
+            <span id="catalog-count" class="muted">Cargando frases…</span>
+          </div>
+
+          <p id="setup-error" class="message message-error" role="alert" hidden></p>
+          <button id="start-game" class="button button-primary button-large" type="submit" disabled>
+            Preparar sesión <span aria-hidden="true">→</span>
+          </button>
+        </form>
+
+        <section class="history-panel" aria-labelledby="history-title">
+          <div class="history-heading">
+            <div>
+              <h2 id="history-title">Estadísticas históricas</h2>
+            </div>
+            <button id="clear-history" class="button button-quiet" type="button">Borrar historial</button>
+          </div>
+          <div class="history-stats" aria-label="Resumen histórico">
+            <div class="history-stat"><strong id="history-sessions">0</strong><span>Sesiones</span></div>
+            <div class="history-stat"><strong id="history-rounds">0</strong><span>Rondas</span></div>
+            <div class="history-stat"><strong id="history-accuracy">0%</strong><span>Precisión media</span></div>
+            <div class="history-stat"><strong id="history-best">0%</strong><span>Mejor resultado</span></div>
+          </div>
+          <div id="history-list" class="history-list"></div>
+        </section>
+      </section>
+
+      <section id="game-screen" class="screen" aria-labelledby="game-title" hidden>
+        <div class="game-topbar">
+          <div>
+            <h2 id="game-title">¿Coincide el audio?</h2>
+          </div>
+          <div class="game-topbar-actions">
+            <div class="timer-pill" aria-live="polite">
+              <span id="turn-counter">01</span>
+              <small id="countdown">3,0 s</small>
+            </div>
+            <button id="quit-game" class="button button-quiet" type="button">Salir</button>
+          </div>
+        </div>
+
+        <div class="progress-block">
+          <div class="progress-meta">
+            <span id="round-label">Calentamiento</span>
+            <span id="score-label">0 aciertos</span>
+          </div>
+          <div class="progress-track" aria-hidden="true"><div id="progress-bar" class="progress-bar"></div></div>
+        </div>
+
+        <div id="warmup-note" class="warmup-note">Escucha y observa. Las respuestas empiezan después del calentamiento.</div>
+
+        <article class="phrase-card" aria-live="polite">
+          <p id="phrase-text" class="phrase-text">—</p>
+          <p id="phrase-translation" class="phrase-translation">—</p>
+        </article>
+
+        <div id="feedback" class="feedback" role="status" aria-live="assertive"></div>
+
+        <div class="answer-actions">
+          <button id="answer-no" class="answer-button answer-no" type="button" disabled>
+            <span class="key-hint">←</span>
+            <span><strong>No coincide</strong><small>Flecha izquierda</small></span>
+          </button>
+          <button id="answer-yes" class="answer-button answer-yes" type="button" disabled>
+            <span><strong>Sí coincide</strong><small>Flecha derecha</small></span>
+            <span class="key-hint">→</span>
+          </button>
+        </div>
+      </section>
+
+      <section id="results-screen" class="screen" aria-labelledby="results-title" hidden>
+        <div class="results-heading">
+          <h2 id="results-title">Tu resultado</h2>
+          <p id="results-summary" class="results-summary">—</p>
+        </div>
+
+        <div class="score-card">
+          <div class="score-ring"><span id="accuracy-score">0%</span><small>precisión</small></div>
+          <div class="stat-grid">
+            <div class="stat"><span id="correct-count">0</span><small>Aciertos</small></div>
+            <div class="stat"><span id="incorrect-count">0</span><small>Errores</small></div>
+            <div class="stat"><span id="missed-count">0</span><small>Omisiones</small></div>
+          </div>
+        </div>
+
+        <div class="results-actions">
+          <button id="repeat-game" class="button button-primary button-large" type="button">Jugar de nuevo <span aria-hidden="true">↻</span></button>
+          <button id="back-to-setup" class="button button-quiet button-large" type="button">Cambiar configuración</button>
+        </div>
+      </section>
+
+      <footer class="app-footer">Frases procedentes de English_B2.xlsx · Audio preparado antes de cada sesión</footer>
+    </main>
+
+    <audio id="success-audio" src="success.mp3" preload="auto"></audio>
+    <audio id="error-audio" src="error.mp3" preload="auto"></audio>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
